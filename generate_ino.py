@@ -202,13 +202,20 @@ def bake_choreography(analysis, effect_mode="Music Reactive", brightness=1.0, se
     baked = []
     breath_speed = 0.45
 
+    def clamp255(v):
+        if v <= 0.0:
+            return 0
+        if v >= 1.0:
+            return 255
+        return int(v * 255.0)
+
     for frame in frames:
         t = frame["time"]
         b = min(1.0, frame["bass"] * sensitivity)
         m = min(1.0, frame["mid"] * sensitivity)
         tr = min(1.0, frame["treble"] * sensitivity)
         rms = min(1.0, frame["rms"] * sensitivity)
-        beat = frame["beat_strength"]
+        beat = frame.get("beat_strength", frame.get("beat", 0.0))
 
         # Calculate effect-based PWM values
         breath = 0.15 + 0.85 * (0.5 + 0.5 * math.sin(t * breath_speed * 2.2))
@@ -232,16 +239,17 @@ def bake_choreography(analysis, effect_mode="Music Reactive", brightness=1.0, se
             strip_val = brightness * (0.18 + 0.55 * b + 0.20 * m + 0.25 * beat)
             xmas_val = brightness * (0.15 + 0.65 * rms + 0.25 * beat)
 
-        strip_duty = int(np.clip(strip_val * 255.0, 0, 255))
-        xmas_duty = int(np.clip(xmas_val * 255.0, 0, 255))
-        bass_duty = int(np.clip(b * 255.0, 0, 255))
-        mid_duty = int(np.clip(m * 255.0, 0, 255))
-        treble_duty = int(np.clip(tr * 255.0, 0, 255))
-        beat_duty = int(np.clip(beat * 255.0, 0, 255))
-
-        baked.append((strip_duty, xmas_duty, bass_duty, mid_duty, treble_duty, beat_duty))
+        baked.append((
+            clamp255(strip_val),
+            clamp255(xmas_val),
+            clamp255(b),
+            clamp255(m),
+            clamp255(tr),
+            clamp255(beat)
+        ))
 
     return baked
+
 
 
 def generate_ino_sketch(analysis, baked_frames, options=None):
@@ -696,17 +704,21 @@ void loop() {{
     return sketch
 
 
-def export_ino_file(audio_path, output_path=None, **options):
+def export_ino_file(audio_path, output_path=None, precomputed_analysis=None, **options):
     """
     High-level export function:
-    1. Analyzes audio file.
+    1. Analyzes audio file (or uses precomputed analysis).
     2. Bakes choreography frames.
     3. Generates Arduino .ino source.
     4. Writes file according to Arduino IDE folder conventions.
     Returns dict with summary and saved file paths.
     """
-    fps = options.get("fps", 20)
-    analysis = analyze_audio_file(audio_path, target_fps=fps)
+    if precomputed_analysis is not None:
+        analysis = precomputed_analysis
+    else:
+        fps = options.get("fps", 20)
+        analysis = analyze_audio_file(audio_path, target_fps=fps)
+
     effect_mode = options.get("effect_mode", "Music Reactive")
     brightness = options.get("brightness", 1.0)
     sensitivity = options.get("sensitivity", 1.5)
@@ -767,15 +779,19 @@ PALETTE_NAME_TO_ID = {
 }
 
 
-def export_sd_show_file(audio_path, output_path=None, **options):
+def export_sd_show_file(audio_path, output_path=None, precomputed_analysis=None, **options):
     """
     Exports a binary SHOW.DAT file for the ESP32 SD-Card Player.
     Once the ESP32 is flashed with esp32_sd_music_player.ino,
     you never need to re-flash it when you change songs!
     """
     import struct
-    fps = options.get("fps", 20)
-    analysis = analyze_audio_file(audio_path, target_fps=fps)
+    if precomputed_analysis is not None:
+        analysis = precomputed_analysis
+    else:
+        fps = options.get("fps", 20)
+        analysis = analyze_audio_file(audio_path, target_fps=fps)
+
     effect_mode = options.get("effect_mode", "Music Reactive")
     brightness = options.get("brightness", 1.0)
     sensitivity = options.get("sensitivity", 1.5)

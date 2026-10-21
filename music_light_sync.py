@@ -12,9 +12,11 @@ import math
 import os
 import socket
 import sys
+import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk, colorchooser
+
 
 import numpy as np
 import pygame
@@ -901,42 +903,63 @@ class MusicLightSimulator:
                 if not save_path:
                     return
 
-                note_lbl.config(text="Analyzing track and generating file, please wait...", fg=GOLD)
-                dialog.update()
+                # Reuse already loaded in-memory analysis so we never re-decode 35 mins of audio from disk!
+                precomputed = None
+                if self.analysis_ready and self.analysis_frames:
+                    precomputed = {
+                        "title": os.path.splitext(os.path.basename(self.track))[0],
+                        "duration": self.duration,
+                        "sample_rate": getattr(self, "audio_sample_rate", 44100),
+                        "hop_seconds": self.analysis_hop_seconds,
+                        "fps": 1.0 / max(1e-6, self.analysis_hop_seconds),
+                        "frames": self.analysis_frames
+                    }
 
-                from generate_ino import export_ino_file, export_sd_show_file
+                note_lbl.config(text="Baking frames & saving file, please wait...", fg=GOLD)
+                btn_gen.config(state="disabled")
 
-                if is_sd:
-                    res = export_sd_show_file(
-                        self.track,
-                        output_path=save_path,
-                        fps=fps_val,
-                        hardware=hw_code,
-                        effect_mode=effect_var.get(),
-                        palette=pal_var.get(),
-                        custom_color=self.custom_color,
-                        auto_loop=loop_var.get()
-                    )
-                    dialog.destroy()
-                    self._show_sd_export_success(res)
-                else:
-                    res = export_ino_file(
-                        self.track,
-                        output_path=save_path,
-                        fps=fps_val,
-                        hardware=hw_code,
-                        effect_mode=effect_var.get(),
-                        palette=pal_var.get(),
-                        custom_color=self.custom_color,
-                        strip_pwm_pin=int(strip_pin_var.get()),
-                        xmas_pwm_pin=int(xmas_pin_var.get()),
-                        neopixel_pin=int(pixel_pin_var.get()),
-                        neopixel_count=int(pixel_count_var.get()),
-                        button_pin=int(button_pin_var.get()),
-                        auto_loop=loop_var.get()
-                    )
-                    dialog.destroy()
-                    self._show_export_success(res)
+                def worker():
+                    try:
+                        from generate_ino import export_ino_file, export_sd_show_file
+                        if is_sd:
+                            res = export_sd_show_file(
+                                self.track,
+                                output_path=save_path,
+                                precomputed_analysis=precomputed,
+                                fps=fps_val,
+                                hardware=hw_code,
+                                effect_mode=effect_var.get(),
+                                palette=pal_var.get(),
+                                custom_color=self.custom_color,
+                                auto_loop=loop_var.get()
+                            )
+                            dialog.after(0, lambda: [dialog.destroy(), self._show_sd_export_success(res)])
+                        else:
+                            res = export_ino_file(
+                                self.track,
+                                output_path=save_path,
+                                precomputed_analysis=precomputed,
+                                fps=fps_val,
+                                hardware=hw_code,
+                                effect_mode=effect_var.get(),
+                                palette=pal_var.get(),
+                                custom_color=self.custom_color,
+                                strip_pwm_pin=int(strip_pin_var.get()),
+                                xmas_pwm_pin=int(xmas_pin_var.get()),
+                                neopixel_pin=int(pixel_pin_var.get()),
+                                neopixel_count=int(pixel_count_var.get()),
+                                button_pin=int(button_pin_var.get()),
+                                auto_loop=loop_var.get()
+                            )
+                            dialog.after(0, lambda: [dialog.destroy(), self._show_export_success(res)])
+                    except Exception as exc:
+                        dialog.after(0, lambda: [
+                            btn_gen.config(state="normal"),
+                            note_lbl.config(text=f"Error: {exc}", fg=RED),
+                            messagebox.showerror("Export Failed", f"Could not generate file:\n\n{exc}", parent=dialog)
+                        ])
+
+                threading.Thread(target=worker, daemon=True).start()
 
             except Exception as exc:
                 messagebox.showerror("Export Failed", f"Could not generate file:\n\n{exc}", parent=dialog)
@@ -945,7 +968,9 @@ class MusicLightSimulator:
         btn_row = tk.Frame(form, bg=PANEL)
         btn_row.pack(fill="x", pady=(4, 10))
         self._button(btn_row, "CANCEL", dialog.destroy, PANEL2).pack(side="left", padx=(0, 6))
-        self._button(btn_row, "⚡ GENERATE SHOW FILE", do_export, "#9c5bff").pack(side="right", fill="x", expand=True, padx=(6, 0))
+        btn_gen = self._button(btn_row, "⚡ GENERATE SHOW FILE", do_export, "#9c5bff")
+        btn_gen.pack(side="right", fill="x", expand=True, padx=(6, 0))
+
 
     def _show_sd_export_success(self, res):
         """Displays completion dialog for SD card show file."""
