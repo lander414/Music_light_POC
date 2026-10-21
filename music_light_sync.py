@@ -11,6 +11,7 @@ Audio analysis uses soundfile to analyze the loaded track directly; no microphon
 import math
 import os
 import socket
+import sys
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk, colorchooser
@@ -22,6 +23,15 @@ try:
     import soundfile as sf
 except ImportError:
     sf = None
+
+try:
+    from generate_ino import export_ino_file, export_sd_show_file, COLOR_PALETTES
+except ImportError:
+    export_ino_file = None
+    export_sd_show_file = None
+    COLOR_PALETTES = {}
+
+
 
 APP_TITLE = "Music Light Sync Simulator"
 UDP_PORT = 4210
@@ -154,8 +164,10 @@ class MusicLightSimulator:
         self._button(row, "PLAY", self.play, GREEN).pack(side="left", fill="x", expand=True, padx=2)
         self._button(row, "PAUSE", self.pause, GOLD).pack(side="left", fill="x", expand=True, padx=2)
         self._button(left, "STOP", self.stop, RED).pack(fill="x", padx=14, pady=(8, 4))
+        self._button(left, "⚡ GENERATE .INO FOR MCU", self.open_export_dialog, "#9c5bff").pack(fill="x", padx=14, pady=(2, 8))
         self.seek_scale = ttk.Scale(left, from_=0, to=100, variable=self.seek_var,
                                     command=self._seek_changed)
+
         self.seek_scale.pack(fill="x", padx=14, pady=(8, 0))
         tk.Label(left, textvariable=self.time_var, bg=PANEL, fg=MUTED,
                  font=("Consolas", 9)).pack(anchor="e", padx=14)
@@ -258,6 +270,7 @@ class MusicLightSimulator:
         tk.Label(bottom, textvariable=self.status_var, bg=BG, fg=GREEN,
                  font=("Segoe UI", 9)).pack(side="left")
         self._button(bottom, "LIGHTS ON / OFF", self.toggle_lights, PANEL2).pack(side="right")
+
 
     def _section(self, parent, title):
         tk.Label(parent, text=title, bg=parent["bg"], fg=ACCENT,
@@ -713,6 +726,326 @@ class MusicLightSimulator:
         self._button(buttons, "CANCEL", dialog.destroy, PANEL2).pack(side="left", padx=3)
         dialog.update_idletasks()
         dialog.geometry(f"{max(dialog.winfo_reqwidth(), 340)}x{dialog.winfo_reqheight()}")
+
+    def open_export_dialog(self):
+        """Open modal dialog to generate and export a standalone Arduino .ino sketch."""
+        if not self.track:
+            msg = messagebox.askyesno("No Music Loaded", "Please load a music file first before generating an .ino sketch.\n\nWould you like to open a music file now?")
+            if msg:
+                self.open_music()
+            if not self.track:
+                return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Export Standalone MCU .INO Sketch")
+        dialog.configure(bg=PANEL)
+        dialog.geometry("540x670")
+        dialog.minsize(500, 600)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        hdr = tk.Frame(dialog, bg=PANEL)
+        hdr.pack(fill="x", padx=18, pady=(16, 6))
+        tk.Label(hdr, text="MCU .INO SKETCH GENERATOR", bg=PANEL, fg=TEXT,
+                 font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        tk.Label(hdr, text="Bakes the music analysis & light choreography into a standalone Arduino sketch.",
+                 bg=PANEL, fg=MUTED, font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 0))
+
+        card = tk.Frame(dialog, bg=PANEL2, padx=12, pady=10)
+        card.pack(fill="x", padx=18, pady=(6, 12))
+        track_name = os.path.basename(self.track)
+        dur_str = self._fmt(self.duration)
+        tk.Label(card, text=f"🎵 {track_name}", bg=PANEL2, fg=TEXT,
+                 font=("Segoe UI", 10, "bold"), anchor="w").pack(fill="x")
+        tk.Label(card, text=f"Duration: {dur_str} ({self.duration:.1f} s) • Ready to bake to Flash ROM",
+                 bg=PANEL2, fg=MUTED, font=("Segoe UI", 8), anchor="w").pack(fill="x", pady=(2, 0))
+
+        form = tk.Frame(dialog, bg=PANEL)
+        form.pack(fill="both", expand=True, padx=18)
+
+        export_mode_var = tk.StringVar(value="SD Card SHOW.DAT (No Re-flashing!)")
+        tk.Label(form, text="EXPORT FORMAT", bg=PANEL, fg=GOLD,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(2, 2))
+        ttk.Combobox(form, textvariable=export_mode_var, state="readonly",
+                     values=["SD Card SHOW.DAT (No Re-flashing!)",
+                             "Standalone Arduino Sketch (.INO)"],
+                     font=("Segoe UI", 9, "bold")).pack(fill="x", pady=(0, 6))
+
+        def open_fw_sketch():
+            fw_file = os.path.abspath("esp32_sd_music_player.ino")
+            if os.path.exists(fw_file) and sys.platform == "win32":
+                os.startfile(fw_file)
+
+        self._button(form, "📄 FLASH ESP32 ONCE: OPEN PLAYER FIRMWARE (.INO)", open_fw_sketch, PANEL2).pack(fill="x", pady=(0, 8))
+
+        mcu_var = tk.StringVar(value="ESP32 (Recommended)")
+        tk.Label(form, text="TARGET MICROCONTROLLER (MCU)", bg=PANEL, fg=ACCENT,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(2, 2))
+        ttk.Combobox(form, textvariable=mcu_var, state="readonly",
+                     values=["ESP32 (Recommended)", "Arduino Uno / Nano / Mega", "Raspberry Pi Pico (RP2040)"],
+                     font=("Segoe UI", 9)).pack(fill="x", pady=(0, 8))
+
+        hw_var = tk.StringVar(value="Both (PWM MOSFETs + WS2812B NeoPixel)")
+        tk.Label(form, text="LIGHTING HARDWARE", bg=PANEL, fg=ACCENT,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(2, 2))
+        ttk.Combobox(form, textvariable=hw_var, state="readonly",
+                     values=["Both (PWM MOSFETs + WS2812B NeoPixel)",
+                             "Dual-Channel PWM MOSFETs Only (Strip & Xmas)",
+                             "Addressable WS2812B NeoPixel Strip Only"],
+                     font=("Segoe UI", 9)).pack(fill="x", pady=(0, 8))
+
+        fx_row = tk.Frame(form, bg=PANEL)
+        fx_row.pack(fill="x", pady=(0, 8))
+        fx_col1 = tk.Frame(fx_row, bg=PANEL)
+        fx_col1.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        tk.Label(fx_col1, text="EFFECT PRESET", bg=PANEL, fg=MUTED,
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        effect_var = tk.StringVar(value=self.mode_var.get())
+        ttk.Combobox(fx_col1, textvariable=effect_var, state="readonly",
+                     values=self.effect_options[1:], font=("Segoe UI", 9)).pack(fill="x", pady=(2, 0))
+
+        fx_col2 = tk.Frame(fx_row, bg=PANEL)
+        fx_col2.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        tk.Label(fx_col2, text="COLOR PALETTE", bg=PANEL, fg=MUTED,
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        pal_var = tk.StringVar(value=self.color_var.get() if self.color_var.get() != "Gradient" else "Rainbow")
+        ttk.Combobox(fx_col2, textvariable=pal_var, state="readonly",
+                     values=["Christmas", "Rainbow", "Warm White", "Blue Ice", "Red", "Green",
+                             "Purple Neon", "Ocean", "Sunset", "Fire", "Cotton Candy", "Custom Color"],
+                     font=("Segoe UI", 9)).pack(fill="x", pady=(2, 0))
+
+        fps_var = tk.StringVar(value="20 FPS (Recommended - 50ms)")
+        tk.Label(form, text="TIMELINE RESOLUTION", bg=PANEL, fg=ACCENT,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(2, 2))
+        ttk.Combobox(form, textvariable=fps_var, state="readonly",
+                     values=["20 FPS (Recommended - 50ms)", "25 FPS (Ultra Smooth - 40ms)", "10 FPS (Compact - 100ms)"],
+                     font=("Segoe UI", 9)).pack(fill="x", pady=(0, 8))
+
+        pins_frame = tk.LabelFrame(form, text=" Hardware Pin Assignments ", bg=PANEL, fg=MUTED,
+                                   font=("Segoe UI", 8, "bold"), padx=8, pady=6)
+        pins_frame.pack(fill="x", pady=(0, 8))
+
+        strip_pin_var = tk.StringVar(value="25")
+        xmas_pin_var = tk.StringVar(value="26")
+        pixel_pin_var = tk.StringVar(value="27")
+        pixel_count_var = tk.StringVar(value="30")
+        button_pin_var = tk.StringVar(value="0")
+
+        tk.Label(pins_frame, text="Strip PWM Pin:", bg=PANEL, fg=TEXT, font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w", pady=2)
+        tk.Entry(pins_frame, textvariable=strip_pin_var, bg=PANEL2, fg=TEXT, width=6, relief="flat", insertbackground=TEXT).grid(row=0, column=1, sticky="w", padx=6, pady=2)
+
+        tk.Label(pins_frame, text="Xmas PWM Pin:", bg=PANEL, fg=TEXT, font=("Segoe UI", 8)).grid(row=0, column=2, sticky="w", pady=2)
+        tk.Entry(pins_frame, textvariable=xmas_pin_var, bg=PANEL2, fg=TEXT, width=6, relief="flat", insertbackground=TEXT).grid(row=0, column=3, sticky="w", padx=6, pady=2)
+
+        tk.Label(pins_frame, text="WS2812B Data Pin:", bg=PANEL, fg=TEXT, font=("Segoe UI", 8)).grid(row=1, column=0, sticky="w", pady=2)
+        tk.Entry(pins_frame, textvariable=pixel_pin_var, bg=PANEL2, fg=TEXT, width=6, relief="flat", insertbackground=TEXT).grid(row=1, column=1, sticky="w", padx=6, pady=2)
+
+        tk.Label(pins_frame, text="WS2812B LED Count:", bg=PANEL, fg=TEXT, font=("Segoe UI", 8)).grid(row=1, column=2, sticky="w", pady=2)
+        tk.Entry(pins_frame, textvariable=pixel_count_var, bg=PANEL2, fg=TEXT, width=6, relief="flat", insertbackground=TEXT).grid(row=1, column=3, sticky="w", padx=6, pady=2)
+
+        tk.Label(pins_frame, text="Sync Button Pin:", bg=PANEL, fg=TEXT, font=("Segoe UI", 8)).grid(row=2, column=0, sticky="w", pady=2)
+        tk.Entry(pins_frame, textvariable=button_pin_var, bg=PANEL2, fg=TEXT, width=6, relief="flat", insertbackground=TEXT).grid(row=2, column=1, sticky="w", padx=6, pady=2)
+
+        tk.Label(pins_frame, text="(GPIO 0 = ESP32 BOOT button)", bg=PANEL, fg=MUTED, font=("Segoe UI", 7)).grid(row=2, column=2, columnspan=2, sticky="w", padx=6, pady=2)
+
+        loop_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(form, text="Auto-loop show when track ends", variable=loop_var,
+                       bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT,
+                       font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 10))
+
+        note_lbl = tk.Label(form, text="Click below to choose where to save your file.",
+                            bg=PANEL, fg=MUTED, font=("Segoe UI", 8))
+        note_lbl.pack(anchor="w", pady=(0, 6))
+
+        def do_export():
+            try:
+                hw_val = hw_var.get()
+                if "PWM" in hw_val and "WS2812B" in hw_val:
+                    hw_code = "both"
+                elif "PWM" in hw_val:
+                    hw_code = "pwm"
+                else:
+                    hw_code = "neopixel"
+
+                fps_str = fps_var.get()
+                fps_val = 20
+                if "25" in fps_str:
+                    fps_val = 25
+                elif "10" in fps_str:
+                    fps_val = 10
+
+                is_sd = "SD Card" in export_mode_var.get()
+
+                safe_default = os.path.splitext(os.path.basename(self.track))[0]
+                import re
+                safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', safe_default)
+                if not safe_name or safe_name[0].isdigit():
+                    safe_name = "Show_" + safe_name
+
+                if is_sd:
+                    save_path = filedialog.asksaveasfilename(
+                        parent=dialog,
+                        title="Save Show File for MicroSD Card",
+                        initialfile="SHOW.DAT",
+                        filetypes=[("SD Card Show File", "*.DAT"), ("All Files", "*.*")]
+                    )
+                else:
+                    default_filename = f"{safe_name}_LightShow.ino"
+                    save_path = filedialog.asksaveasfilename(
+                        parent=dialog,
+                        title="Save Arduino Sketch (.ino)",
+                        initialfile=default_filename,
+                        filetypes=[("Arduino Sketch", "*.ino"), ("All Files", "*.*")]
+                    )
+
+                if not save_path:
+                    return
+
+                note_lbl.config(text="Analyzing track and generating file, please wait...", fg=GOLD)
+                dialog.update()
+
+                from generate_ino import export_ino_file, export_sd_show_file
+
+                if is_sd:
+                    res = export_sd_show_file(
+                        self.track,
+                        output_path=save_path,
+                        fps=fps_val,
+                        hardware=hw_code,
+                        effect_mode=effect_var.get(),
+                        palette=pal_var.get(),
+                        custom_color=self.custom_color,
+                        auto_loop=loop_var.get()
+                    )
+                    dialog.destroy()
+                    self._show_sd_export_success(res)
+                else:
+                    res = export_ino_file(
+                        self.track,
+                        output_path=save_path,
+                        fps=fps_val,
+                        hardware=hw_code,
+                        effect_mode=effect_var.get(),
+                        palette=pal_var.get(),
+                        custom_color=self.custom_color,
+                        strip_pwm_pin=int(strip_pin_var.get()),
+                        xmas_pwm_pin=int(xmas_pin_var.get()),
+                        neopixel_pin=int(pixel_pin_var.get()),
+                        neopixel_count=int(pixel_count_var.get()),
+                        button_pin=int(button_pin_var.get()),
+                        auto_loop=loop_var.get()
+                    )
+                    dialog.destroy()
+                    self._show_export_success(res)
+
+            except Exception as exc:
+                messagebox.showerror("Export Failed", f"Could not generate file:\n\n{exc}", parent=dialog)
+                note_lbl.config(text=f"Error: {exc}", fg=RED)
+
+        btn_row = tk.Frame(form, bg=PANEL)
+        btn_row.pack(fill="x", pady=(4, 10))
+        self._button(btn_row, "CANCEL", dialog.destroy, PANEL2).pack(side="left", padx=(0, 6))
+        self._button(btn_row, "⚡ GENERATE SHOW FILE", do_export, "#9c5bff").pack(side="right", fill="x", expand=True, padx=(6, 0))
+
+    def _show_sd_export_success(self, res):
+        """Displays completion dialog for SD card show file."""
+        succ = tk.Toplevel(self.root)
+        succ.title("SD Card Show File Ready!")
+        succ.configure(bg=PANEL)
+        succ.geometry("560x390")
+        succ.transient(self.root)
+        succ.grab_set()
+
+        tk.Label(succ, text="💾 SHOW.DAT READY FOR SD CARD!", bg=PANEL, fg=GREEN,
+                 font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=18, pady=(18, 6))
+        tk.Label(succ, text=f"Generated show file for '{res['title']}'. No re-flashing needed!",
+                 bg=PANEL, fg=TEXT, font=("Segoe UI", 10)).pack(anchor="w", padx=18, pady=(0, 10))
+
+        info_box = tk.Frame(succ, bg=PANEL2, padx=12, pady=10)
+        info_box.pack(fill="x", padx=18, pady=(0, 14))
+
+        tk.Label(info_box, text=f"• Total Duration: {self._fmt(res['duration'])} ({res['duration']:.1f} s)",
+                 bg=PANEL2, fg=MUTED, font=("Segoe UI", 9)).pack(anchor="w")
+        tk.Label(info_box, text=f"• Keyframes: {res['frames']} baked @ {res['fps']:.1f} FPS",
+                 bg=PANEL2, fg=MUTED, font=("Segoe UI", 9)).pack(anchor="w")
+        tk.Label(info_box, text=f"• File Size: {res['total_bytes']:,} bytes (~{res['total_bytes']//1024} KB)",
+                 bg=PANEL2, fg=MUTED, font=("Segoe UI", 9)).pack(anchor="w")
+        tk.Label(info_box, text=f"• Saved File:\n  {res['dat_path']}",
+                 bg=PANEL2, fg=ACCENT, font=("Segoe UI", 8, "bold"), justify="left", wraplength=500).pack(anchor="w", pady=(4, 0))
+
+        tk.Label(succ, text="How to play on ESP32:\n1. Copy 'SHOW.DAT' directly to your MicroSD card root directory.\n2. Insert the card into your ESP32 running 'esp32_sd_music_player.ino'.\n3. The ESP32 starts playing immediately!",
+                 bg=PANEL, fg=MUTED, font=("Segoe UI", 8), justify="left").pack(anchor="w", padx=18, pady=(0, 12))
+
+        btn_row = tk.Frame(succ, bg=PANEL)
+        btn_row.pack(fill="x", padx=18, pady=(0, 12))
+
+        def open_folder():
+            folder = res["dat_dir"]
+            if os.path.exists(folder):
+                if sys.platform == "win32":
+                    os.startfile(folder)
+                elif sys.platform == "darwin":
+                    import subprocess
+                    subprocess.run(["open", folder])
+                else:
+                    import subprocess
+                    subprocess.run(["xdg-open", folder])
+
+        def open_esp_firmware():
+            fw_path = os.path.abspath("esp32_sd_music_player.ino")
+            if os.path.exists(fw_path) and sys.platform == "win32":
+                os.startfile(fw_path)
+
+        self._button(btn_row, "📂 OPEN FILE FOLDER", open_folder, ACCENT).pack(side="left", padx=(0, 6))
+        self._button(btn_row, "⚡ OPEN ESP32 FIRMWARE", open_esp_firmware, GOLD).pack(side="left", padx=(0, 6))
+        self._button(btn_row, "CLOSE", succ.destroy, PANEL2).pack(side="right")
+
+
+    def _show_export_success(self, res):
+        """Displays a polished completion dialog with file paths and open folder shortcut."""
+        succ = tk.Toplevel(self.root)
+        succ.title("Arduino .INO Sketch Generated Successfully!")
+        succ.configure(bg=PANEL)
+        succ.geometry("540x360")
+        succ.transient(self.root)
+        succ.grab_set()
+
+        tk.Label(succ, text="🎉 .INO SKETCH READY TO FLASH!", bg=PANEL, fg=GREEN,
+                 font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=18, pady=(18, 6))
+        tk.Label(succ, text=f"Generated standalone light show sketch for '{res['title']}'.",
+                 bg=PANEL, fg=TEXT, font=("Segoe UI", 10)).pack(anchor="w", padx=18, pady=(0, 10))
+
+        info_box = tk.Frame(succ, bg=PANEL2, padx=12, pady=10)
+        info_box.pack(fill="x", padx=18, pady=(0, 14))
+
+        tk.Label(info_box, text=f"• Total Duration: {self._fmt(res['duration'])} ({res['duration']:.1f} s)",
+                 bg=PANEL2, fg=MUTED, font=("Segoe UI", 9)).pack(anchor="w")
+        tk.Label(info_box, text=f"• Keyframes: {res['frames']} baked @ {res['fps']:.1f} FPS",
+                 bg=PANEL2, fg=MUTED, font=("Segoe UI", 9)).pack(anchor="w")
+        tk.Label(info_box, text=f"• Sketch Location:\n  {res['ino_path']}",
+                 bg=PANEL2, fg=ACCENT, font=("Segoe UI", 8, "bold"), justify="left", wraplength=480).pack(anchor="w", pady=(4, 0))
+
+        tk.Label(succ, text="How to flash:\n1. Open the .ino file in Arduino IDE.\n2. Select your Board (e.g. ESP32 Dev Module) and COM port.\n3. Click 'Upload' to flash directly to your MCU!",
+                 bg=PANEL, fg=MUTED, font=("Segoe UI", 8), justify="left").pack(anchor="w", padx=18, pady=(0, 12))
+
+        btn_row = tk.Frame(succ, bg=PANEL)
+        btn_row.pack(fill="x", padx=18, pady=(0, 12))
+
+        def open_folder():
+            folder = res["sketch_dir"]
+            if os.path.exists(folder):
+                if sys.platform == "win32":
+                    os.startfile(folder)
+                elif sys.platform == "darwin":
+                    import subprocess
+                    subprocess.run(["open", folder])
+                else:
+                    import subprocess
+                    subprocess.run(["xdg-open", folder])
+
+        self._button(btn_row, "📂 OPEN FOLDER IN FILE EXPLORER", open_folder, ACCENT).pack(side="left", padx=(0, 6))
+        self._button(btn_row, "CLOSE", succ.destroy, PANEL2).pack(side="right")
+
 
     def add_light_set(self):
         items = self.strip_effects if self.selected_set_type.get() == "LED Strip" else self.christmas_effects
