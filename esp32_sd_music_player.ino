@@ -110,6 +110,12 @@ const uint8_t PALETTE_LENS[] = {5, 6, 3, 4, 3, 3, 4, 4, 4, 5, 4, 5};
 ShowHeader currentHeader;
 LightFrame* showFrames = nullptr;
 bool showLoaded = false;
+bool isStreamingMode = false;
+File activeShowFile;
+const size_t STREAM_CACHE_SIZE = 128;
+LightFrame streamCache[STREAM_CACHE_SIZE];
+uint32_t streamCacheStart = 0xFFFFFFFF;
+
 bool sdActive = false;
 bool littlefsActive = false;
 
@@ -146,6 +152,7 @@ uint32_t scaleRGB(uint32_t color, float factor) {
 void restartShow() {
   showStartMs = millis();
   isPaused = false;
+  streamCacheStart = 0xFFFFFFFF;
 }
 
 void printHelp() {
@@ -195,29 +202,35 @@ bool loadShowFile(fs::FS &fs, const char* path) {
   Serial.printf("  Palette ID:   %u\n", currentHeader.paletteId);
   Serial.printf("  Flags:        0x%02X\n", currentHeader.flags);
 
-  // Free any previous frame buffer
+  // Free any previous RAM frame buffer
   if (showFrames != nullptr) {
     free(showFrames);
     showFrames = nullptr;
   }
-
-  size_t dataBytes = currentHeader.frameCount * sizeof(LightFrame);
-  Serial.printf("  Allocating %u bytes in RAM...\n", dataBytes);
-
-  showFrames = (LightFrame*)malloc(dataBytes);
-  if (showFrames == nullptr) {
-    Serial.println("ERROR: Insufficient RAM to buffer show!");
-    f.close();
-    return false;
+  if (activeShowFile) {
+    activeShowFile.close();
   }
 
-  size_t readBytes = f.read((uint8_t*)showFrames, dataBytes);
-  f.close();
+  size_t dataBytes = currentHeader.frameCount * sizeof(LightFrame);
+  size_t maxAlloc = ESP.getMaxAllocHeap();
+  Serial.printf("  Show data size: %u bytes (Max free RAM block: %u bytes)\n", dataBytes, maxAlloc);
 
-  if (readBytes != dataBytes) {
-    Serial.printf("Warning: Expected %u bytes, read %u bytes.\n", dataBytes, readBytes);
+  // If track fits in RAM, buffer entirely into RAM. Otherwise stream from SD card!
+  if (dataBytes < (maxAlloc - 20000)) {
+    showFrames = (LightFrame*)malloc(dataBytes);
+  }
+
+  if (showFrames != nullptr) {
+    size_t readBytes = f.read((uint8_t*)showFrames, dataBytes);
+    f.close();
+    isStreamingMode = false;
+    Serial.printf(">>> Entire show (%u bytes) loaded into RAM! <<<\n", readBytes);
   } else {
-    Serial.println(">>> Show successfully loaded into RAM! <<<");
+    // Large file (e.g. 35+ minute track) -> stream from SD Card using 128-frame cache block!
+    isStreamingMode = true;
+    activeShowFile = f; // Keep file open for playback streaming
+    streamCacheStart = 0xFFFFFFFF;
+    Serial.println(">>> Large show detected (30+ mins): Streaming directly from SD Card! <<<");
   }
 
   autoLoop = (currentHeader.flags & 0x04) != 0;
@@ -226,8 +239,30 @@ bool loadShowFile(fs::FS &fs, const char* path) {
   return true;
 }
 
+LightFrame fetchSingleFrame(uint32_t index) {
+  if (index >= currentHeader.frameCount) {
+    index = currentHeader.frameCount - 1;
+  }
+
+  if (!isStreamingMode && showFrames != nullptr) {
+    return showFrames[index];
+  }
+
+  // Streaming mode: check 128-frame buffer
+  if (index < streamCacheStart || index >= streamCacheStart + STREAM_CACHE_SIZE) {
+    streamCacheStart = index;
+    uint32_t count = min((uint32_t)STREAM_CACHE_SIZE, currentHeader.frameCount - index);
+    if (activeShowFile) {
+      activeShowFile.seek(sizeof(ShowHeader) + index * sizeof(LightFrame));
+      activeShowFile.read((uint8_t*)streamCache, count * sizeof(LightFrame));
+    }
+  }
+
+  return streamCache[index - streamCacheStart];
+}
+
 void getInterpolatedFrame(unsigned long elapsedMs, LightFrame &out) {
-  if (!showLoaded || currentHeader.frameCount == 0 || showFrames == nullptr) {
+  if (!showLoaded || currentHeader.frameCount == 0) {
     out = {0, 0, 0, 0, 0, 0};
     return;
   }
@@ -245,15 +280,15 @@ void getInterpolatedFrame(unsigned long elapsedMs, LightFrame &out) {
   uint32_t frameIdx = elapsedMs / intervalMs;
 
   if (frameIdx >= currentHeader.frameCount - 1) {
-    out = showFrames[currentHeader.frameCount - 1];
+    out = fetchSingleFrame(currentHeader.frameCount - 1);
     return;
   }
 
   uint32_t remainderMs = elapsedMs % intervalMs;
   float alpha = (float)remainderMs / (float)intervalMs;
 
-  LightFrame f0 = showFrames[frameIdx];
-  LightFrame f1 = showFrames[frameIdx + 1];
+  LightFrame f0 = fetchSingleFrame(frameIdx);
+  LightFrame f1 = fetchSingleFrame(frameIdx + 1);
 
   out.strip  = (uint8_t)(f0.strip  + (f1.strip  - (int)f0.strip)  * alpha);
   out.xmas   = (uint8_t)(f0.xmas   + (f1.xmas   - (int)f0.xmas)   * alpha);
